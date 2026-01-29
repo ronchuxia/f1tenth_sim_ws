@@ -7,6 +7,8 @@ import numpy as np
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
 
 
 class SafetyNode(Node):
@@ -48,6 +50,12 @@ class SafetyNode(Node):
             10
         )
 
+        self.marker_publisher = self.create_publisher(
+            Marker,
+            'ttc_marker',
+            10
+        )
+
 
     def odom_callback(self, odom_msg):
         v_x = odom_msg.twist.twist.linear.x
@@ -70,14 +78,55 @@ class SafetyNode(Node):
 
         min_ttc_index = np.argmin(ttc)
         min_ttc_angle = angle_min + min_ttc_index * angle_increment
-        min_ttc_angle_deg = np.degrees(min_ttc_angle)
 
         ttc_threshold = 0.25  # seconds
-        if min_ttc < ttc_threshold:
-            self.get_logger().info(f"Brake, ttc: {min_ttc}, angle: {min_ttc_angle_deg}")
+        is_braking = min_ttc < ttc_threshold
+
+        self.publish_ttc_marker(min_ttc_angle, min_ttc, is_braking)
+
+        if is_braking:
+            self.get_logger().info(f"Brake, ttc: {min_ttc}")
             self.emergency_brake()
         else:
-            self.get_logger().info(f"Safe, ttc: {min_ttc}, angle: {min_ttc_angle_deg}")
+            self.get_logger().info(f"Safe, ttc: {min_ttc}")
+
+    def publish_ttc_marker(self, angle, ttc, is_braking):
+        arrow_length = 0.5
+
+        # Arrow marker
+        arrow = Marker()
+        arrow.header.stamp = self.get_clock().now().to_msg()
+        arrow.header.frame_id = 'ego_racecar/laser'
+        arrow.ns = 'ttc_arrow'
+        arrow.id = 0
+        arrow.type = Marker.ARROW
+        arrow.action = Marker.ADD
+
+        arrow.points = []
+        start = Point()
+        start.x = 0.0
+        start.y = 0.0
+        start.z = 0.0
+        end = Point()
+        end.x = arrow_length * np.cos(angle)
+        end.y = arrow_length * np.sin(angle)
+        end.z = 0.0
+        arrow.points.append(start)
+        arrow.points.append(end)
+
+        arrow.scale.x = 0.05  # shaft diameter
+        arrow.scale.y = 0.1   # head diameter
+
+        if is_braking:
+            arrow.color.r = 1.0
+            arrow.color.g = 0.0
+        else:
+            arrow.color.r = 0.0
+            arrow.color.g = 1.0
+        arrow.color.b = 0.0
+        arrow.color.a = 1.0
+
+        self.marker_publisher.publish(arrow)
 
     def emergency_brake(self):
         msg = AckermannDriveStamped()
