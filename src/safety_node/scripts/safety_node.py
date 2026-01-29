@@ -25,7 +25,8 @@ class SafetyNode(Node):
 
         NOTE that the x component of the linear velocity in odom is the speed
         """
-        self.speed = 0.
+        self.v_x = 0.
+        self.omega_z = 0.
         
         self.drive_publisher = self.create_publisher(
             AckermannDriveStamped,
@@ -50,21 +51,20 @@ class SafetyNode(Node):
 
     def odom_callback(self, odom_msg):
         v_x = odom_msg.twist.twist.linear.x
+        omega_z = odom_msg.twist.twist.angular.z
 
-        # omega_z = odom_msg.twist.twist.angular.z
-
-        self.speed = v_x
+        self.v_x = v_x
+        self.omega_z = omega_z
 
     def scan_callback(self, scan_msg):
-        # TODO: Add AEB when turning
         ranges = np.array(scan_msg.ranges)  # No nan or inf values in the simulation
         num_ranges = len(ranges)
 
         angle_min = scan_msg.angle_min
-        angle_max = scan_msg.angle_max
         angle_increment = scan_msg.angle_increment
+        angles = np.arange(0, num_ranges) * angle_increment + angle_min
 
-        range_rates = - self.speed * np.cos(np.arange(0, num_ranges) * angle_increment + angle_min)
+        range_rates = - self.v_x * np.cos(angles) - self.omega_z * 0.275 * np.sin(angles)
         ttc = np.maximum(ranges - 0.148, 1e-5) / np.maximum(-range_rates, 1e-5)  # Account for car shape (lidar offset + car width + wheel radius)
         min_ttc = np.min(ttc)
 
