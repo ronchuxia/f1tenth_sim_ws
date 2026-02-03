@@ -42,7 +42,7 @@ class WallFollow(Node):
         self.kp = 1.0
         self.kd = 0.1
         self.ki = 0.3
-        self.alpha = 0.2
+        self.alpha = 0.1
 
         # store history
         self.integral = 0.0
@@ -121,7 +121,15 @@ class WallFollow(Node):
         dt = self.time - self.prev_time
         self.integral += self.error * dt
 
-        angle = self.kp * self.error + self.kd * (self.filtered_error - self.prev_error) / dt + self.ki * self.integral
+        p_term = self.kp * self.error
+        d_term = self.kd * (self.filtered_error - self.prev_error) / dt
+        i_term = self.ki * self.integral
+        d_term = np.clip(d_term, -1.0, 1.0)
+        i_term = np.clip(i_term, -1.0, 1.0)
+        angle = p_term + d_term + i_term
+
+        self.prev_error = self.filtered_error
+        self.prev_time = self.time
 
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = self.get_clock().now().to_msg()
@@ -135,7 +143,7 @@ class WallFollow(Node):
             velocity = 1.0
         else:
             velocity = 0.5
-        self.get_logger().info(f"angle: {angle}, d:{self.kd * (self.filtered_error - self.prev_error) / dt}")
+        # self.get_logger().info(f"angle: {angle}, d:{self.kd * (self.filtered_error - self.prev_error) / dt}")
 
         # publish
         drive_msg.drive.speed = velocity
@@ -148,15 +156,12 @@ class WallFollow(Node):
             plot_msg = Float64MultiArray()
             plot_msg.data = [
                 self.error,
-                self.kp * self.error,
-                self.kd * (self.error - self.prev_error) / dt,
-                self.ki * self.integral,
+                p_term,
+                d_term,
+                i_term,
                 angle
             ]
             self.plot_publisher.publish(plot_msg)
-
-        self.prev_error = self.filtered_error
-        self.prev_time = self.time
 
     def scan_callback(self, msg):
         """
@@ -216,6 +221,7 @@ class WallFollow(Node):
 def main(args=None):
     rclpy.init(args=args)
     print("WallFollow Initialized")
+    time.sleep(5)
     wall_follow_node = WallFollow()
     rclpy.spin(wall_follow_node)
 
