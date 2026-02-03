@@ -72,8 +72,10 @@ class SafetyNode(Node):
         angle_increment = scan_msg.angle_increment
         angles = np.arange(0, num_ranges) * angle_increment + angle_min
 
+        offsets = np.where((angles >= -90) & (angles <= 90), 0.148, 0.171)
+
         range_rates = - self.v_x * np.cos(angles) - self.omega_z * 0.275 * np.sin(angles)
-        ttc = np.maximum(ranges - 0.148, 1e-5) / np.maximum(-range_rates, 1e-5)  # Account for car shape (lidar offset + car width + wheel radius)
+        ttc = np.maximum(ranges - offsets, 1e-5) / np.maximum(-range_rates, 1e-5)  # Account for car shape (lidar offset + car width + wheel radius)
         min_ttc = np.min(ttc)
 
         min_ttc_index = np.argmin(ttc)
