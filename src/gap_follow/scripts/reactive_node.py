@@ -32,7 +32,7 @@ class ReactiveFollowGap(Node):
         self.window_size = 3   # dt ~ 0.005s * window_size
         self.ranges_window = deque()
 
-        self.bubble_radius = 0.2
+        self.bubble_radius = 0.25
         self.debug = True
 
         self.angle_speed_publisher = self.create_publisher(Marker, 'angle_speed', 10)
@@ -63,7 +63,7 @@ class ReactiveFollowGap(Node):
         angle_increment = data.angle_increment
         angles = np.arange(0, num_ranges) * angle_increment + angle_min
 
-        idx_forward = np.abs(angles) < np.pi / 4
+        idx_forward = np.abs(angles) < np.pi / 3
         proc_ranges = proc_ranges[idx_forward]
         angles = angles[idx_forward]
 
@@ -114,12 +114,15 @@ class ReactiveFollowGap(Node):
         closest_point = pos[closest_point_idx, :]  # shape (2, )
 
         # Eliminate all points inside 'bubble' (set them to zero) 
-        dist_to_closest = np.linalg.norm(pos - closest_point, axis=1)  # shape (num_ranges, )   
+        dist_to_closest = proc_ranges[closest_point_idx] * np.sin(np.abs(angles - angles[closest_point_idx]))  
         points_in_bubble = dist_to_closest < self.bubble_radius
         free_space_ranges = np.where(points_in_bubble, 0.0, proc_ranges)   # shape (num_ranges, )
 
         # Find max length gap 
         widest_gap_start, widest_gap_end = self.find_max_gap(free_space_ranges)
+
+        if widest_gap_end == widest_gap_start:  # No gap found
+            return
 
         # Find the best point in the gap
         best_point_idx = self.find_best_point(widest_gap_start, widest_gap_end, free_space_ranges)
