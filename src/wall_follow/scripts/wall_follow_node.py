@@ -8,8 +8,10 @@ import numpy as np
 from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped
 from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point, Vector3
+from geometry_msgs.msg import Point
 from std_msgs.msg import Float64MultiArray
+
+from collections import deque
 
 
 class WallFollow(Node):
@@ -42,9 +44,11 @@ class WallFollow(Node):
         self.kp = 1.0
         self.kd = 0.1
         self.ki = 0.3
-        self.alpha = 0.1
+        self.alpha = 0.2
 
         # store history
+        self.window_size = 50   # dt ~ 0.005s * 10
+        self.ranges_window = deque()
         self.integral = 0.0
         self.prev_error = None
         self.error = None
@@ -61,6 +65,7 @@ class WallFollow(Node):
 
         self.vis_publisher = self.create_publisher(Marker, 'angle_speed', 10)
         self.plot_publisher = self.create_publisher(Float64MultiArray, 'pid_debug', 10)
+        self.lidar_timestamp = None
 
     def get_range(self, range_data, angle):
         """
@@ -115,7 +120,6 @@ class WallFollow(Node):
             self.prev_time = self.time
             return 
 
-        # TODO: make d term more stable
         self.filtered_error = self.alpha * self.error + (1 - self.alpha) * self.prev_error
 
         dt = self.time - self.prev_time
@@ -143,7 +147,6 @@ class WallFollow(Node):
             velocity = 1.0
         else:
             velocity = 0.5
-        # self.get_logger().info(f"angle: {angle}, d:{self.kd * (self.filtered_error - self.prev_error) / dt}")
 
         # publish
         drive_msg.drive.speed = velocity
@@ -173,13 +176,15 @@ class WallFollow(Node):
         Returns:
             None
         """
+        self.lidar_timestamp = msg.header.stamp
         range_data = np.array(msg.ranges)
+        range_data[np.isnan(range_data)] = 1e-5
+        range_data[np.isinf(range_data)] = msg.range_max
+        
+        range_data = self.preprocess_lidar(range_data)
         self.angle_min = msg.angle_min
         self.angle_increment = msg.angle_increment
         self.time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-
-        range_data[np.isnan(range_data)] = 1e-5
-        range_data[np.isinf(range_data)] = msg.range_max
 
         self.error = self.get_error(range_data, self.dist)   # compute error
         self.pid_control() # actuate the car with PID
@@ -188,7 +193,7 @@ class WallFollow(Node):
         arrow_length = speed
 
         arrow = Marker()
-        arrow.header.stamp = self.get_clock().now().to_msg()
+        arrow.header.stamp = self.lidar_timestamp
         arrow.header.frame_id = 'ego_racecar/laser'
         arrow.ns = 'ttc_arrow'
         arrow.id = 0
@@ -217,11 +222,22 @@ class WallFollow(Node):
 
         self.vis_publisher.publish(arrow)
 
+    def preprocess_lidar(self, ranges):
+        """ Preprocess the LiDAR scan array. Expert implementation includes:
+            1.Setting each value to the mean over some window
+            2.Rejecting high values (eg. > 3m)
+        """
+        if len(self.ranges_window) >= self.window_size:
+            self.ranges_window.popleft()
+        self.ranges_window.append(ranges)
+        proc_ranges = np.mean(np.stack(self.ranges_window), axis=0)
+        proc_ranges = np.clip(proc_ranges, 1e-5, 3)
+        return proc_ranges
+
 
 def main(args=None):
     rclpy.init(args=args)
     print("WallFollow Initialized")
-    time.sleep(5)
     wall_follow_node = WallFollow()
     rclpy.spin(wall_follow_node)
 

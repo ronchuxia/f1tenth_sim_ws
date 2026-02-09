@@ -3,7 +3,6 @@ import rclpy
 from rclpy.node import Node
 
 import numpy as np
-# TODO: include needed ROS msg type headers and libraries
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
@@ -56,6 +55,8 @@ class SafetyNode(Node):
             10
         )
 
+        self.lidar_timestamp = None
+
 
     def odom_callback(self, odom_msg):
         v_x = odom_msg.twist.twist.linear.x
@@ -65,6 +66,7 @@ class SafetyNode(Node):
         self.omega_z = omega_z
 
     def scan_callback(self, scan_msg):
+        self.lidar_timestamp = scan_msg.header.stamp
         ranges = np.array(scan_msg.ranges)  # No nan or inf values in the simulation
         num_ranges = len(ranges)
 
@@ -89,15 +91,15 @@ class SafetyNode(Node):
         if is_braking:
             self.get_logger().info(f"Brake, ttc: {min_ttc}")
             self.emergency_brake()
-        else:
-            self.get_logger().info(f"Safe, ttc: {min_ttc}")
+        # else:
+        #     self.get_logger().info(f"Safe, ttc: {min_ttc}")
 
     def publish_ttc_marker(self, angle, ttc, is_braking):
         arrow_length = 0.5
 
         # Arrow marker
         arrow = Marker()
-        arrow.header.stamp = self.get_clock().now().to_msg()
+        arrow.header.stamp = self.lidar_timestamp
         arrow.header.frame_id = 'ego_racecar/laser'
         arrow.ns = 'ttc_arrow'
         arrow.id = 0
