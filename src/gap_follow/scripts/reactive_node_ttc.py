@@ -5,6 +5,7 @@ from rclpy.node import Node
 
 import numpy as np
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
 
 from visualization_msgs.msg import Marker
@@ -28,6 +29,11 @@ class ReactiveFollowGap(Node):
         # Publish to drive
         self.drive_publisher = self.create_publisher(AckermannDriveStamped, drive_topic, 10)
 
+        self.odom_subscription = self.create_subscription(Odometry, 'ego_racecar/odom', self.odom_callback, 10)
+
+        self.v_x = 0.
+        self.omega_z = 0.
+
         # A window of ranges
         self.window_size = 3   # dt ~ 0.005s * window_size
         self.ranges_window = deque()
@@ -39,6 +45,13 @@ class ReactiveFollowGap(Node):
         self.closest_point_publisher = self.create_publisher(Marker, 'closest_point', 10)
         self.widest_gap_publisher = self.create_publisher(Marker, 'widest_gap', 10)
         self.lidar_timestamp = None
+
+    def odom_callback(self, odom_msg):
+        v_x = odom_msg.twist.twist.linear.x
+        omega_z = odom_msg.twist.twist.angular.z
+
+        self.v_x = v_x
+        self.omega_z = omega_z
 
     def preprocess_lidar(self, data):
         """ Preprocess the LiDAR scan array. Expert implementation includes:
@@ -63,7 +76,7 @@ class ReactiveFollowGap(Node):
         angle_increment = data.angle_increment
         angles = np.arange(0, num_ranges) * angle_increment + angle_min
 
-        idx_forward = np.abs(angles) < np.pi / 3
+        idx_forward = np.abs(angles) < np.pi / 2.0
         proc_ranges = proc_ranges[idx_forward]
         angles = angles[idx_forward]
 
@@ -96,7 +109,6 @@ class ReactiveFollowGap(Node):
         """
         gap = ranges[start_i:end_i]
         best_point_idx = np.argmax(gap) + start_i
-        # best_point_idx = (start_i + end_i) // 2
         return best_point_idx
 
     def lidar_callback(self, data):
@@ -105,8 +117,16 @@ class ReactiveFollowGap(Node):
         self.lidar_timestamp = data.header.stamp
         proc_ranges, angles = self.preprocess_lidar(data)
 
-        # Find closest point to LiDAR
-        closest_point_idx = np.argmin(proc_ranges)
+        x = proc_ranges * np.cos(angles)    # shape (num_ranges, )
+        y = proc_ranges * np.sin(angles)    # shape (num_ranges, )
+        pos = np.stack([x, y], axis=1)  # shape (num_ranges, 2)
+
+        # Find closest point (ttc)
+        range_rates = - self.v_x * np.cos(angles) - self.omega_z * 0.275 * np.sin(angles)
+        ttc = np.maximum(proc_ranges - 0.148, 1e-5) / np.maximum(-range_rates, 1e-5)
+
+        closest_point_idx = np.argmin(ttc)
+        closest_point = pos[closest_point_idx, :]  # shape (2, )
 
         # Eliminate all points inside 'bubble' (set them to zero) 
         dist_to_closest = proc_ranges[closest_point_idx] * np.sin(np.abs(angles - angles[closest_point_idx]))  
