@@ -47,6 +47,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/reactive_node.py
   scripts/reactive_node_ttc.py
+  scripts/reactive_node_extender.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

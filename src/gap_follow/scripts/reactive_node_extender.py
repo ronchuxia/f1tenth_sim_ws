@@ -35,10 +35,11 @@ class ReactiveFollowGap(Node):
         self.omega_z = 0.
 
         # A window of ranges
-        self.window_size = 3   # dt ~ 0.005s * window_size
+        self.window_size = 1   # dt ~ 0.005s * window_size
         self.ranges_window = deque()
 
-        self.bubble_radius = 0.25
+        self.disparity_threshold = 0.5
+        self.bubble_radius = 0.3
         self.debug = True
 
         self.angle_speed_publisher = self.create_publisher(Marker, 'angle_speed', 10)
@@ -116,6 +117,22 @@ class ReactiveFollowGap(Node):
         """
         self.lidar_timestamp = data.header.stamp
         proc_ranges, angles = self.preprocess_lidar(data)
+        num_ranges = len(proc_ranges)
+
+        disparity_left = np.insert((proc_ranges[:-1] - proc_ranges[1:]), 0, 0) > self.disparity_threshold
+        disparity_left_idx = np.where(disparity_left)[0]
+        disparity_right = np.append((proc_ranges[1:] - proc_ranges[:-1]), 0) > self.disparity_threshold
+        disparity_right_idx = np.where(disparity_right)[0]
+
+        free_space_ranges = np.copy(proc_ranges)
+        for i in disparity_left_idx:
+            dist_to_disparity = proc_ranges[i] * np.sin(np.abs(angles - angles[i]))  
+            points_in_bubble = (dist_to_disparity < self.bubble_radius) & (np.arange(num_ranges) < i)
+            free_space_ranges[points_in_bubble] = np.minimum(proc_ranges[i], free_space_ranges[points_in_bubble])
+        for i in disparity_right_idx:
+            dist_to_disparity = proc_ranges[i] * np.sin(np.abs(angles - angles[i]))  
+            points_in_bubble = (dist_to_disparity < self.bubble_radius) & (np.arange(num_ranges) > i)
+            free_space_ranges[points_in_bubble] = np.minimum(proc_ranges[i], free_space_ranges[points_in_bubble])
 
         # Find closest point (ttc)
         range_rates = - self.v_x * np.cos(angles) - self.omega_z * 0.275 * np.sin(angles)
@@ -126,8 +143,8 @@ class ReactiveFollowGap(Node):
         # Eliminate all points inside 'bubble' (set them to zero) 
         dist_to_closest = proc_ranges[closest_point_idx] * np.sin(np.abs(angles - angles[closest_point_idx]))  
         points_in_bubble = dist_to_closest < self.bubble_radius
-        free_space_ranges = np.where(points_in_bubble, 0.0, proc_ranges)   # shape (num_ranges, )
-
+        free_space_ranges = np.where(points_in_bubble, 0.0, free_space_ranges)   # shape (num_ranges, )
+        
         # Find max length gap 
         widest_gap_start, widest_gap_end = self.find_max_gap(free_space_ranges)
 
@@ -148,8 +165,9 @@ class ReactiveFollowGap(Node):
 
         if self.debug:
             self.draw_angle_speed(best_point_angle, velocity)
-            self.draw_closest_point(proc_ranges[closest_point_idx], angles[closest_point_idx], self.bubble_radius)
-            self.draw_widest_gap(proc_ranges[widest_gap_start:widest_gap_end], angles[widest_gap_start:widest_gap_end])
+            self.draw_widest_gap(free_space_ranges, angles)
+            disparity = np.concatenate((disparity_left_idx, disparity_right_idx))
+            # self.draw_widest_gap(proc_ranges[disparity], angles[disparity])
 
         # Publish Drive message
         drive_msg = AckermannDriveStamped()
@@ -192,30 +210,6 @@ class ReactiveFollowGap(Node):
 
         self.angle_speed_publisher.publish(arrow) 
 
-    def draw_closest_point(self, range, angle, radius):
-        point = Marker()
-        point.header.stamp = self.lidar_timestamp
-        point.header.frame_id = 'ego_racecar/laser'
-        point.ns = 'closest_point'
-        point.id = 0
-        point.type = Marker.SPHERE
-        point.action = Marker.ADD
-
-        point.pose.position.x = range * np.cos(angle)
-        point.pose.position.y = range * np.sin(angle)
-        point.pose.position.z = 0.0
-
-        point.scale.x = radius
-        point.scale.y = radius
-        point.scale.z = 0.01
-
-        point.color.r = 1.0
-        point.color.g = 0.0
-        point.color.b = 0.0
-        point.color.a = 1.0
-
-        self.closest_point_publisher.publish(point)
-    
     def draw_widest_gap(self, ranges, angles):
         points = Marker()
         points.header.stamp = self.lidar_timestamp
@@ -232,13 +226,13 @@ class ReactiveFollowGap(Node):
             point.z = 0.0
             points.points.append(point)
         
-        points.scale.x = 0.05
-        points.scale.y = 0.05
-        points.scale.z = 0.05
+        points.scale.x = 0.1
+        points.scale.y = 0.1
+        points.scale.z = 0.1
 
-        points.color.r = 0.0
+        points.color.r = 1.0
         points.color.g = 0.0
-        points.color.b = 1.0
+        points.color.b = 0.0
         points.color.a = 1.0
 
         self.widest_gap_publisher.publish(points)
