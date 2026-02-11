@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 import rclpy
 from rclpy.node import Node
 
@@ -40,7 +41,7 @@ class ReactiveFollowGap(Node):
 
         self.disparity_threshold = 0.5
         self.bubble_radius = 0.3
-        self.debug = True
+        self.debug = False
 
         self.angle_speed_publisher = self.create_publisher(Marker, 'angle_speed', 10)
         self.closest_point_publisher = self.create_publisher(Marker, 'closest_point', 10)
@@ -86,21 +87,8 @@ class ReactiveFollowGap(Node):
     def find_max_gap(self, free_space_ranges):
         """ Return the start index & end index of the max gap in free_space_ranges
         """
-        num_ranges = len(free_space_ranges)
-        gap_start = 0
         widest_gap_start = 0
-        gap_size = 0
-        widest_gap_size = 0
-        for i in range(num_ranges):
-            if not np.isclose(free_space_ranges[i], 0.0):
-                if i-1 >= 0 and np.isclose(free_space_ranges[i-1], 0.0):
-                    gap_start = i
-                gap_size += 1
-                if gap_size > widest_gap_size:
-                    widest_gap_size = gap_size
-                    widest_gap_start = gap_start
-            else:
-                gap_size = 0
+        widest_gap_size = len(free_space_ranges)
         return widest_gap_start, widest_gap_start + widest_gap_size
     
     def find_best_point(self, start_i, end_i, ranges):
@@ -133,17 +121,6 @@ class ReactiveFollowGap(Node):
             dist_to_disparity = proc_ranges[i] * np.sin(np.abs(angles - angles[i]))  
             points_in_bubble = (dist_to_disparity < self.bubble_radius) & (np.arange(num_ranges) > i)
             free_space_ranges[points_in_bubble] = np.minimum(proc_ranges[i], free_space_ranges[points_in_bubble])
-
-        # Find closest point (ttc)
-        range_rates = - self.v_x * np.cos(angles) - self.omega_z * 0.275 * np.sin(angles)
-        ttc = np.maximum(proc_ranges - 0.148, 1e-5) / np.maximum(-range_rates, 1e-5)
-
-        closest_point_idx = np.argmin(ttc)
-
-        # Eliminate all points inside 'bubble' (set them to zero) 
-        dist_to_closest = proc_ranges[closest_point_idx] * np.sin(np.abs(angles - angles[closest_point_idx]))  
-        points_in_bubble = dist_to_closest < self.bubble_radius
-        free_space_ranges = np.where(points_in_bubble, 0.0, free_space_ranges)   # shape (num_ranges, )
         
         # Find max length gap 
         widest_gap_start, widest_gap_end = self.find_max_gap(free_space_ranges)
@@ -153,21 +130,31 @@ class ReactiveFollowGap(Node):
 
         # Find the best point in the gap
         best_point_idx = self.find_best_point(widest_gap_start, widest_gap_end, free_space_ranges)
+        best_point_range = proc_ranges[best_point_idx]
         best_point_angle = angles[best_point_idx]
 
+        best_point_angle /= 2
+        # l = np.minimum(1, np.min(proc_ranges))
+        # best_point_angle = 2 * np.arctan2(l * np.sin(best_point_angle), l * np.cos(best_point_angle) + 0.275)
+
         angle_deg = best_point_angle / math.pi * 180
-        if abs(angle_deg) < 10:
-            velocity = 1.5
-        elif abs(angle_deg) < 20:
-            velocity = 1.0
+        if abs(angle_deg) < 10 and best_point_range > 0.5:
+            velocity = 5.0
+        elif abs(angle_deg) < 20 and best_point_range > 0.5:
+            velocity = 3.0
         else:
             velocity = 0.5
+
+        if best_point_angle < 0:
+            if np.any(proc_ranges[angles < 0] < 0.2):
+                best_point_angle = 0.0
+        else:
+            if np.any(proc_ranges[angles > 0] < 0.2):
+                best_point_angle = 0.0
 
         if self.debug:
             self.draw_angle_speed(best_point_angle, velocity)
             self.draw_widest_gap(free_space_ranges, angles)
-            disparity = np.concatenate((disparity_left_idx, disparity_right_idx))
-            # self.draw_widest_gap(proc_ranges[disparity], angles[disparity])
 
         # Publish Drive message
         drive_msg = AckermannDriveStamped()

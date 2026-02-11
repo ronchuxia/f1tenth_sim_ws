@@ -85,22 +85,15 @@ class ReactiveFollowGap(Node):
     def find_max_gap(self, free_space_ranges):
         """ Return the start index & end index of the max gap in free_space_ranges
         """
-        num_ranges = len(free_space_ranges)
-        gap_start = 0
-        widest_gap_start = 0
-        gap_size = 0
-        widest_gap_size = 0
-        for i in range(num_ranges):
-            if not np.isclose(free_space_ranges[i], 0.0):
-                if i-1 >= 0 and np.isclose(free_space_ranges[i-1], 0.0):
-                    gap_start = i
-                gap_size += 1
-                if gap_size > widest_gap_size:
-                    widest_gap_size = gap_size
-                    widest_gap_start = gap_start
-            else:
-                gap_size = 0
-        return widest_gap_start, widest_gap_start + widest_gap_size
+        mask = ~np.isclose(free_space_ranges, 0.0)
+        padded = np.concatenate(([False], mask, [False]))                                                           
+        diffs = np.diff(padded.astype(int))
+        starts = np.where(diffs == 1)[0]                                                                            
+        ends = np.where(diffs == -1)[0]                                                                           
+        if len(starts) == 0:
+            return 0, 0
+        best = np.argmax(ends - starts)
+        return starts[best], ends[best]
     
     def find_best_point(self, start_i, end_i, ranges):
         """Start_i & end_i are start and end indicies of max-gap range, respectively
