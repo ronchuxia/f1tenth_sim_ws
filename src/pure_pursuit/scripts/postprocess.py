@@ -40,8 +40,8 @@ def main(file_name, subsample_rate=100, draw=False, smooth=False):
 
 
 if __name__ == '__main__':
-    file_name = '/sim_ws/src/pure_pursuit/waypoints/levine_raw.csv'
-    subsample_rate = 200
+    file_name = '/sim_ws/src/pure_pursuit/waypoints/hallway_raw.csv'
+    subsample_rate = 300
     draw = True
     smooth = False
     main(file_name, subsample_rate=subsample_rate, draw=draw, smooth=smooth)

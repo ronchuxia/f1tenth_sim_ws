@@ -23,7 +23,7 @@ class PurePursuit(Node):
         self.drive_publisher = self.create_publisher(AckermannDriveStamped, '/drive', 10)
 
         # read waypoints from file
-        self.waypoints = np.loadtxt("/sim_ws/src/pure_pursuit/waypoints/waypoints.csv", delimiter=',')[:,:2]
+        self.waypoints = np.loadtxt("/sim_ws/src/pure_pursuit/waypoints/levine_waypoints.csv", delimiter=',')[:,:2]
 
         # publisher for all waypoints (publish once)
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -33,9 +33,17 @@ class PurePursuit(Node):
         # publisher for target waypoint
         self.target_publisher = self.create_publisher(Marker, '/rviz_target', 10)
 
-        self.l = 0.5
-        self.p = 1.0
-        self.v = 1.0
+        # publisher for predicted trajectory
+        self.trajectory_publisher = self.create_publisher(Marker, '/rviz_trajectory', 10)
+
+        self.declare_parameter('l', 0.5)
+        self.declare_parameter('p', 1.0)
+        self.declare_parameter('v', 1.0)
+        self.declare_parameter('interpolate', False)
+        self.l = self.get_parameter('l').value
+        self.p = self.get_parameter('p').value
+        self.v = self.get_parameter('v').value
+        self.interpolate = self.get_parameter('interpolate').value
 
     def pose_callback(self, pose_msg):
         self.timestamp = pose_msg.header.stamp
@@ -44,8 +52,8 @@ class PurePursuit(Node):
                             pose_msg.pose.pose.orientation.z, 
                             pose_msg.pose.pose.orientation.w])
         euler = euler_from_quaternion(quaternion)
-        euler_z = euler[2]
-        
+        self.euler_z = euler[2]
+
         # find the current waypoint to track
         self.pos = np.array([pose_msg.pose.pose.position.x, pose_msg.pose.pose.position.y])
         dist = np.linalg.norm(self.waypoints - self.pos, axis=1)
@@ -60,12 +68,24 @@ class PurePursuit(Node):
         waypoint_smaller = self.waypoints[target_idx]
         waypoint_larger = self.waypoints[target_idx+1]
 
-        self.target_x = waypoint_larger[0]
-        self.target_y = waypoint_larger[1]
-        l = dist[target_idx+1]
+        if not self.interpolate:
+            self.target_x = waypoint_larger[0]
+            self.target_y = waypoint_larger[1]
+            l = dist[target_idx+1]
+        else:
+            d = waypoint_larger - waypoint_smaller
+            f = waypoint_smaller - self.pos
+            a = d @ d                                  
+            b = 2 * (f @ d)                            
+            c = (f @ f) - self.l ** 2                  
+            t = (-b + np.sqrt(b**2 - 4*a*c)) / (2*a)   
+            target = waypoint_smaller + t * d          
+            self.target_x = target[0]
+            self.target_y = target[1]                  
+            l = self.l
         
         # transform goal point to vehicle frame of reference
-        y = (self.target_y - self.pos[1]) * np.cos(euler_z) - (self.target_x - self.pos[0]) * np.sin(euler_z)
+        y = (self.target_y - self.pos[1]) * np.cos(self.euler_z) - (self.target_x - self.pos[0]) * np.sin(self.euler_z)
 
         # calculate curvature/steering angle
         self.gamma = 2 * y / l ** 2
@@ -79,8 +99,9 @@ class PurePursuit(Node):
         drive_msg.drive.steering_angle = self.angle
         self.drive_publisher.publish(drive_msg)
 
-        # visualize goal point
+        # visualize goal point and trajectory
         self.visualize_target()
+        self.visualize_trajectory()
 
     def visualize_waypoints(self):
         points = Marker()
@@ -131,6 +152,37 @@ class PurePursuit(Node):
         sphere.color.a = 1.0
 
         self.target_publisher.publish(sphere)
+
+    def visualize_trajectory(self, steps=20, arc_length=2.0):
+        line = Marker()
+        line.header.stamp = self.timestamp
+        line.header.frame_id = 'ego_racecar/base_link'
+        line.ns = 'trajectory'
+        line.id = 0
+        line.type = Marker.LINE_STRIP
+        line.action = Marker.ADD
+        line.scale.x = 0.05
+
+        line.color.r = 1.0
+        line.color.g = 1.0
+        line.color.b = 0.0
+        line.color.a = 1.0
+
+        if abs(self.gamma) < 1e-3:
+            # straight line along +x
+            for i in range(steps):
+                p = Point(x=arc_length * i / (steps - 1), y=0.0, z=0.0)
+                line.points.append(p)
+        else:
+            R = 1.0 / self.gamma
+            total_angle = arc_length / R
+            for i in range(steps):
+                a = -np.pi / 2 + total_angle * i / (steps - 1)
+                p = Point(x=R * np.cos(a), y=R + R * np.sin(a), z=0.0)
+                line.points.append(p)
+                line.points.append(p)
+
+        self.trajectory_publisher.publish(line)
 
 
 def main(args=None):
