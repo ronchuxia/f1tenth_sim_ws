@@ -62,6 +62,7 @@ class RRT(Node):
         self.euler_z = 0.0
         self.pos = np.array([0.0, 0.0])
         self.waypoints = np.loadtxt("/sim_ws/src/pure_pursuit/waypoints/hallway_waypoints.csv", delimiter=',')[:,:2]
+        self.goal_pos = np.array([0.0, 0.0])
         
         if self.vis:
             waypoints_marker = visualize_points(self.waypoints, self.pose_timestamp, frame_id='/map', ns='waypoints', id=0, color=(1.0, 0.0, 0.0, 1.0))
@@ -69,7 +70,7 @@ class RRT(Node):
 
     def initialize_parameters(self):
         # grid size
-        self.declare_parameter('grid_size', 300)
+        self.declare_parameter('grid_size', 80)
         self.grid_size = self.get_parameter('grid_size').value
 
         # grid resolution, in meters
@@ -99,7 +100,7 @@ class RRT(Node):
         self.goal_threshold = self.get_parameter('goal_threshold').value
 
         # step size for steering, in meters
-        self.declare_parameter('step_size', 0.1)
+        self.declare_parameter('step_size', 0.25)
         self.step_size = self.get_parameter('step_size').value
 
         # look ahead distance for goal selection, in meters
@@ -113,6 +114,10 @@ class RRT(Node):
         # velocity for pure pursuit, in m/s
         self.declare_parameter('v', 1.0)
         self.v = self.get_parameter('v').value
+
+        # probability of sampling the goal point in the sampling function
+        self.declare_parameter('goal_sample_rate', 0.1)
+        self.goal_sample_rate = self.get_parameter('goal_sample_rate').value
 
         # visualization
         self.declare_parameter('vis', True)
@@ -177,6 +182,7 @@ class RRT(Node):
 
         # transform goal point to vehicle frame
         goal_pos = self.map_to_base_link(goal)
+        self.goal_pos = goal_pos
         if self.vis:
             self.marker_array = MarkerArray()
             goal_marker = visualize_point(goal_pos, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='goal', color=(0.0, 0.0, 1.0, 1.0))
@@ -220,6 +226,8 @@ class RRT(Node):
 
         """
         # TODO: improve sampling method
+        if np.random.rand() < self.goal_sample_rate: # with 10% probability, sample the goal point to encourage goal bias
+            return self.goal_pos
         x_lower_bound = -self.origin_x * self.grid_resolution
         x_upper_bound = (self.grid_size - self.origin_x) * self.grid_resolution
         y_lower_bound = -self.origin_y * self.grid_resolution
