@@ -29,13 +29,14 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from tf_transformations import euler_from_quaternion
 
 from lab6_pkg.helper import find_target_waypoint, visualize_point, visualize_points, visualize_trajectory, visualize_tree, visualize_path, visualize_occupancy_grid
+from collections import deque
 
 
 class RRTree(object):
     def __init__(self):
         self.pos = np.array([[0.0, 0.0]]) # shape (num_nodes, 2)
         self.parent = np.array([-1])
-        self.cost = None # only used in RRT*
+        self.cost = np.array([0.0]) # only used in RRT*
 
 
 # class def for RRT
@@ -123,6 +124,10 @@ class RRT(Node):
         self.declare_parameter('goal_sample_rate', 0.1)
         self.goal_sample_rate = self.get_parameter('goal_sample_rate').value
 
+        # gamma for RRT*
+        self.declare_parameter('gamma', 10)
+        self.gamma = self.get_parameter('gamma').value
+
         # visualization
         self.declare_parameter('vis', True)
         self.vis = self.get_parameter('vis').value
@@ -201,8 +206,11 @@ class RRT(Node):
             new_node = self.steer(nearest_node, sampled_point)
 
             if not self.check_collision(nearest_node, new_node):
-                self.RRT.pos = np.vstack((self.RRT.pos, new_node))
-                self.RRT.parent = np.append(self.RRT.parent, nearest_node_idx)
+                neighborhood_idx = self.near(self.RRT, new_node)
+
+                self.connect(self.RRT, new_node, nearest_node_idx, neighborhood_idx)
+                
+                self.rewire(self.RRT, new_node, neighborhood_idx)
 
                 if self.is_goal(new_node, goal_pos):
                     path = self.find_path(self.RRT, len(self.RRT.pos)-1)
@@ -219,9 +227,8 @@ class RRT(Node):
                         self.marker_array_publisher.publish(self.marker_array)
                     
                     return
-        
+                
         self.get_logger().info("Path not found!")
-
 
     def sample(self):
         """
@@ -374,28 +381,57 @@ class RRT(Node):
         return base_link_pos
 
     # The following methods are needed for RRT* and not RRT
-    def cost(self, tree, node):
+    def connect(self, tree, new_node, nearest_node_idx, neighborhood_idx):
         """
-        This method should return the cost of a node
+        Connect the new node to the tree.
+        """
+        node_min = nearest_node_idx
+        cost_min = tree.cost[nearest_node_idx] + self.line_cost(tree.pos[nearest_node_idx], new_node)
+        for i in range(len(neighborhood_idx)):
+            neighbor_idx = neighborhood_idx[i]
+            collision = self.check_collision(tree.pos[neighbor_idx], new_node)
+            cost = tree.cost[neighbor_idx] + self.line_cost(tree.pos[neighbor_idx], new_node)
+            if not collision and cost < cost_min:
+                node_min = neighbor_idx
+                cost_min = cost
+            
+        tree.pos = np.vstack((tree.pos, new_node))
+        tree.parent = np.append(tree.parent, node_min)
+        tree.cost = np.append(tree.cost, cost_min)
 
-        Args:
-            node (Node): the current node the cost is calculated for
-        Returns:
-            cost (float): the cost value of the node
+    def rewire(self, tree, new_node, neighborhood_idx):
         """
-        return 0
+        Rewire the neighborhood after connecting the new node to the tree.
+        """
+        for i in range(len(neighborhood_idx)):
+            neighbor_idx = neighborhood_idx[i]
+            collision = self.check_collision(new_node, tree.pos[neighbor_idx])
+            cost = tree.cost[-1] + self.line_cost(new_node, tree.pos[neighbor_idx])
+            if not collision and cost < tree.cost[neighbor_idx]:
+                tree.parent[neighbor_idx] = len(tree.pos) - 1
+                tree.cost[neighbor_idx] = cost
+
+                parents = deque()
+                parents.append(neighbor_idx)
+                while parents:
+                    parent = parents.popleft()
+                    children = (tree.parent == parent).nonzero()[0]
+                    for child in children:
+                        tree.cost[child] = tree.cost[parent] + self.line_cost(tree.pos[parent], tree.pos[child])
+                        parents.append(child)
 
     def line_cost(self, n1, n2):
         """
         This method should return the cost of the straight line between n1 and n2
 
         Args:
-            n1 (Node): node at one end of the straight line
-            n2 (Node): node at the other end of the straint line
+            n1 (np.ndarray): position of the first node
+            n2 (np.ndarray): position of the second node
         Returns:
             cost (float): the cost value of the line
         """
-        return 0
+        cost = LA.norm(n1 - n2)
+        return cost
 
     def near(self, tree, node):
         """
@@ -403,11 +439,17 @@ class RRT(Node):
 
         Args:
             tree ([]): current tree as a list of Nodes
-            node (Node): current node we're finding neighbors for
+            node_pos (np.ndarray): position of the current node we're finding neighbors for
         Returns:
-            neighborhood ([]): neighborhood of nodes as a list of Nodes
+            neighborhood (np.ndarray): neighborhood of nodes as an array of node indices
         """
-        neighborhood = []
+        num_nodes = len(tree.pos)
+        # radius = min(self.gamma * (math.sqrt(math.log(num_nodes) / num_nodes)), self.step_size)
+        radius = 0.8
+        nodes = tree.pos
+        dist = LA.norm(nodes - node, axis=1)
+        in_neighborhood = dist < radius
+        neighborhood = in_neighborhood.nonzero()[0]
         return neighborhood
 
 

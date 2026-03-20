@@ -53,6 +53,7 @@ ament_python_install_package(${PROJECT_NAME})
 # Install Python executables
 install(PROGRAMS
   scripts/rrt_node.py
+  scripts/rrt_star_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
