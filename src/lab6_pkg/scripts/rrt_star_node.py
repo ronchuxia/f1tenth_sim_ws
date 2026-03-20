@@ -21,14 +21,13 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
-from nav_msgs.msg import OccupancyGrid
 
 from scipy.ndimage import binary_dilation
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from tf_transformations import euler_from_quaternion
 
-from lab6_pkg.helper import find_target_waypoint, visualize_point, visualize_points, visualize_trajectory, visualize_tree, visualize_path, visualize_occupancy_grid
+from lab6_pkg.helper import find_target_waypoint, visualize_point, visualize_points, visualize_trajectory, visualize_tree, visualize_path, visualize_occupancy_grid_as_marker_array
 from collections import deque
 
 
@@ -50,7 +49,7 @@ class RRT(Node):
         self.scan_sub_ = self.create_subscription(LaserScan, '/scan', self.scan_callback, 1)
 
         self.drive_publisher = self.create_publisher(AckermannDriveStamped, '/drive', 10)
-        self.occupancy_grid_publisher = self.create_publisher(OccupancyGrid, '/rviz_occupancy_grid', 10)
+        self.occupancy_grid_publisher = self.create_publisher(MarkerArray, '/rviz_occupancy_grid', 10)
 
         if self.vis:
             qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -176,7 +175,7 @@ class RRT(Node):
         self.occupancy_grid = binary_dilation(self.occupancy_grid, structure=np.ones((2*bubble_cells+1, 2*bubble_cells+1)))
 
         if self.vis:
-            occupancy_grid_msg = visualize_occupancy_grid(self.occupancy_grid, self.lidar_timestamp, self.grid_resolution, self.grid_size, self.grid_size, self.origin_x, self.origin_y)
+            occupancy_grid_msg = visualize_occupancy_grid_as_marker_array(self.occupancy_grid, self.lidar_timestamp, self.grid_resolution, self.origin_x, self.origin_y)
             self.occupancy_grid_publisher.publish(occupancy_grid_msg)
 
     def pose_callback(self, pose_msg):
