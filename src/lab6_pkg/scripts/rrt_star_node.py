@@ -125,8 +125,14 @@ class RRT(Node):
         self.goal_sample_rate = self.get_parameter('goal_sample_rate').value
 
         # gamma for RRT*
-        self.declare_parameter('gamma', 10)
+        self.declare_parameter('gamma', 10.0)
         self.gamma = self.get_parameter('gamma').value
+
+        self.declare_parameter('fix_rewire_radius', True)
+        self.fix_rewire_radius = self.get_parameter('fix_rewire_radius').value
+
+        self.declare_parameter('rewire_radius', 0.8)
+        self.rewire_radius = self.get_parameter('rewire_radius').value
 
         # visualization
         self.declare_parameter('vis', True)
@@ -444,11 +450,13 @@ class RRT(Node):
             neighborhood (np.ndarray): neighborhood of nodes as an array of node indices
         """
         num_nodes = len(tree.pos)
-        # radius = min(self.gamma * (math.sqrt(math.log(num_nodes) / num_nodes)), self.step_size)
-        radius = 0.8
+        if not self.fix_rewire_radius:
+            rewire_radius = min(self.gamma * (math.sqrt(math.log(num_nodes) / num_nodes)), self.step_size)
+        else:
+            rewire_radius = self.rewire_radius
         nodes = tree.pos
         dist = LA.norm(nodes - node, axis=1)
-        in_neighborhood = dist < radius
+        in_neighborhood = dist < rewire_radius
         neighborhood = in_neighborhood.nonzero()[0]
         return neighborhood
 
