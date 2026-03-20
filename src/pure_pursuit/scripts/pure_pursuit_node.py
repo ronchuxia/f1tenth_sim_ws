@@ -56,6 +56,7 @@ class PurePursuit(Node):
 
         # find the current waypoint to track
         self.pos = np.array([pose_msg.pose.pose.position.x, pose_msg.pose.pose.position.y])
+        # NOTE: If using pf/pose/odom, position is the laser position, not the base_link position. You need to transform it to the base_link position by adding the laser offset (0.275m) in the x direction of the car frame.
         dist = np.linalg.norm(self.waypoints - self.pos, axis=1)
 
         smaller = (dist <= self.l)
