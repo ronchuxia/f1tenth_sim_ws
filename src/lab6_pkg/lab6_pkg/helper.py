@@ -4,7 +4,7 @@ from geometry_msgs.msg import Point
 from nav_msgs.msg import OccupancyGrid
 
 
-def find_target_waypoint(waypoints, pos, l, interpolate=True):
+def find_target_waypoint(waypoints, pos, l, interpolate=False):
     """
     Args:
         waypoints (np.ndarray): shape (num_waypoints, 2), waypoints

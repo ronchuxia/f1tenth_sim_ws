@@ -2,19 +2,11 @@
 """
 This file contains the class definition for tree nodes and RRT
 Before you start, please read: https://arxiv.org/pdf/1105.1186.pdf
-
-TODO: 
-- Implement a probabilistic occupancy grid.
-    - Shift the occupancy grid according to odom.
-    - Update the occupancy grid according to lidar scans.
-- Implement RRT rebuild gate.
-- Implement RRT*.
-- Implement pure pursuit with odom.
-- Replace particle filter with faster SLAM methods.
 """
 import numpy as np
 from numpy import linalg as LA
 import math
+from scipy.interpolate import splprep, splev
 
 import rclpy
 from rclpy.node import Node
@@ -28,13 +20,15 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from tf_transformations import euler_from_quaternion
 
 from lab6_pkg.helper import find_target_waypoint, visualize_point, visualize_points, visualize_trajectory, visualize_tree, visualize_path, visualize_occupancy_grid_as_marker_array
+from collections import deque
 
 
 class RRTree(object):
     def __init__(self):
         self.pos = np.array([[0.0, 0.0]]) # shape (num_nodes, 2)
         self.parent = np.array([-1])
-        self.cost = None # only used in RRT*
+        self.cost = np.array([0.0]) # only used in RRT*
+        self.children = [[]]        # children[i] = list of child indices of node i
 
 
 # class def for RRT
@@ -56,10 +50,13 @@ class RRT(Node):
 
             self.marker_array = MarkerArray()
             self.marker_array_publisher = self.create_publisher(MarkerArray, '/rviz_markers', 10)
+            self.tree_publisher = self.create_publisher(Marker, '/rviz_tree', 10)
 
         # occupancy grid
         self.RRT = RRTree()
         self.occupancy_grid = np.zeros((self.grid_size, self.grid_size))
+        self.current_path_map = None  # cached path in map frame
+        self.last_goal_map = None
         self.lidar_timestamp = self.get_clock().now().to_msg()
         self.pose_timestamp = self.get_clock().now().to_msg()
         self.euler_z = 0.0
@@ -116,21 +113,38 @@ class RRT(Node):
         self.declare_parameter('l_pure_pursuit', 1.0)
         self.l_pure_pursuit = self.get_parameter('l_pure_pursuit').value
 
+        self.declare_parameter('p', 1.0)
+        self.p = self.get_parameter('p').value
+
         # velocity for pure pursuit, in m/s
         self.declare_parameter('v', 1.0)
         self.v = self.get_parameter('v').value
-
-        # proportional gain for steering angle
-        self.declare_parameter('p', 1.0)
-        self.p = self.get_parameter('p').value
 
         # probability of sampling the goal point in the sampling function
         self.declare_parameter('goal_sample_rate', 0.1)
         self.goal_sample_rate = self.get_parameter('goal_sample_rate').value
 
+        # gamma for RRT*
+        self.declare_parameter('gamma', 10.0)
+        self.gamma = self.get_parameter('gamma').value
+
+        self.declare_parameter('fix_rewire_radius', True)
+        self.fix_rewire_radius = self.get_parameter('fix_rewire_radius').value
+
+        self.declare_parameter('rewire_radius', 0.8)
+        self.rewire_radius = self.get_parameter('rewire_radius').value
+
         # visualization
         self.declare_parameter('vis', True)
         self.vis = self.get_parameter('vis').value
+
+        # max distance from car to cached path before replanning, in meters
+        self.declare_parameter('path_deviation_threshold', 0.2)
+        self.path_deviation_threshold = self.get_parameter('path_deviation_threshold').value
+
+        # max goal displacement before replanning, in meters
+        self.declare_parameter('goal_change_threshold', 0.2)
+        self.goal_change_threshold = self.get_parameter('goal_change_threshold').value
 
     def scan_callback(self, scan_msg):
         """
@@ -200,36 +214,53 @@ class RRT(Node):
             goal_marker = visualize_point(goal_pos, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='goal', color=(0.0, 0.0, 1.0, 1.0))
             self.marker_array.markers.append(goal_marker)
 
+        # reuse cached path if still valid
+        if self.is_path_valid(goal):
+            smoothed_path = self.map_to_base_link_path(self.current_path_map)
+            if self.vis:
+                path_marker = visualize_path(smoothed_path, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='path', id=0, color=(0.0, 1.0, 1.0, 1.0))
+                self.marker_array.markers.append(path_marker)
+            self.pure_pursuit(smoothed_path)
+            if self.vis:
+                self.marker_array_publisher.publish(self.marker_array)
+            return
+
+        self.get_logger().info("Rebuilding RRT.")
         # RRT
         self.RRT = RRTree() # reset RRT
-        for i in range(self.max_iterations):
+        for _ in range(self.max_iterations):
             sampled_point = self.sample()
             nearest_node_idx = self.nearest(self.RRT, sampled_point)
             nearest_node = self.RRT.pos[nearest_node_idx]
             new_node = self.steer(nearest_node, sampled_point)
 
             if not self.check_collision(nearest_node, new_node):
-                self.RRT.pos = np.vstack((self.RRT.pos, new_node))
-                self.RRT.parent = np.append(self.RRT.parent, nearest_node_idx)
+                neighborhood_idx = self.near(self.RRT, new_node)
+
+                self.connect(self.RRT, new_node, nearest_node_idx, neighborhood_idx)
+
+                self.rewire(self.RRT, new_node, neighborhood_idx)
 
                 if self.is_goal(new_node, goal_pos):
                     path = self.find_path(self.RRT, len(self.RRT.pos)-1)
+                    smoothed_path = self.smooth_path(path)
+                    self.current_path_map = self.base_link_to_map_path(smoothed_path)
+                    self.last_goal_map = goal.copy()
 
                     if self.vis:
                         tree_marker = visualize_tree(self.RRT.pos, self.RRT.parent, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='tree', id=0, color=(1.0, 0.0, 0.0, 1.0))
-                        path_marker = visualize_path(path, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='path', id=0, color=(0.0, 1.0, 1.0, 1.0))
-                        self.marker_array.markers.append(tree_marker)
+                        self.tree_publisher.publish(tree_marker)
+                        path_marker = visualize_path(smoothed_path, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='path', id=0, color=(0.0, 1.0, 1.0, 1.0))
                         self.marker_array.markers.append(path_marker)
 
-                    self.pure_pursuit(path)
+                    self.pure_pursuit(smoothed_path)
 
                     if self.vis:
                         self.marker_array_publisher.publish(self.marker_array)
-                    
-                    return
-        
-        self.get_logger().info("Path not found!")
 
+                    return
+
+        self.get_logger().info("Path not found!")
 
     def sample(self):
         """
@@ -338,6 +369,25 @@ class RRT(Node):
             path.append(tree.parent[path[-1]])
         return self.RRT.pos[path[::-1]] # shape (num_nodes_in_path, 2)
     
+    def smooth_path(self, path):
+        # # shortcutting
+        # shortcut = [path[0]]
+        # i = 0
+        # while i < len(path) - 1:
+        #     for j in range(len(path) - 1, i, -1):
+        #         if not self.check_collision(path[i], path[j]):
+        #             shortcut.append(path[j])
+        #             i = j
+        #             break
+        # path = np.array(shortcut)
+        # spline
+        if len(path) < 4:
+            return path
+        tck, _ = splprep([path[:, 0], path[:, 1]], s=0, k=3)
+        t = np.linspace(0, 1, len(path)*10)
+        xs, ys = splev(t, tck)
+        return np.column_stack([xs, ys])
+
     def pure_pursuit(self, path):
         """
         Args:
@@ -364,6 +414,47 @@ class RRT(Node):
             trajectory_marker = visualize_trajectory(angle, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='trajectory', id=0, color=(0.0, 1.0, 0.0, 1.0), steps=20, arc_length=self.l_pure_pursuit)
             self.marker_array.markers.append(trajectory_marker)
 
+    def is_path_valid(self, goal):
+        if self.current_path_map is None:
+            return False
+
+        # check 1: goal has moved significantly
+        if self.last_goal_map is None or LA.norm(goal - self.last_goal_map) > self.goal_change_threshold:
+            return False
+
+        # check 2: car has deviated too far from the path
+        if np.min(LA.norm(self.current_path_map - self.pos, axis=1)) > self.path_deviation_threshold:
+            return False
+
+        # check 3: path is no longer collision-free
+        path_base_link = self.map_to_base_link_path(self.current_path_map)
+        for j in range(len(path_base_link) - 1):
+            n1, n2 = path_base_link[j], path_base_link[j + 1]
+            # skip segments outside the grid (unknown space — treat as free)
+            pts_x = np.array([n1[0], n2[0]]) // self.grid_resolution + self.origin_x
+            pts_y = np.array([n1[1], n2[1]]) // self.grid_resolution + self.origin_y
+            if (np.any(pts_x < 0) or np.any(pts_x >= self.grid_size) or
+                np.any(pts_y < 0) or np.any(pts_y >= self.grid_size)):
+                continue
+            if self.check_collision(n1, n2):
+                return False
+
+        return True
+
+    def map_to_base_link_path(self, path_map):
+        dx = path_map[:, 0] - self.pos[0]
+        dy = path_map[:, 1] - self.pos[1]
+        base_link_x = dx * np.cos(self.euler_z) + dy * np.sin(self.euler_z)
+        base_link_y = dy * np.cos(self.euler_z) - dx * np.sin(self.euler_z)
+        return np.column_stack([base_link_x, base_link_y])
+
+    def base_link_to_map_path(self, path_base_link):
+        bx = path_base_link[:, 0]
+        by = path_base_link[:, 1]
+        map_x = self.pos[0] + bx * np.cos(self.euler_z) - by * np.sin(self.euler_z)
+        map_y = self.pos[1] + bx * np.sin(self.euler_z) + by * np.cos(self.euler_z)
+        return np.column_stack([map_x, map_y])
+
     def process_pose_msg(self, pose_msg):
         self.pose_timestamp = pose_msg.header.stamp
         quaternion = np.array([pose_msg.pose.pose.orientation.x, 
@@ -382,28 +473,63 @@ class RRT(Node):
         return base_link_pos
 
     # The following methods are needed for RRT* and not RRT
-    def cost(self, tree, node):
+    def connect(self, tree, new_node, nearest_node_idx, neighborhood_idx):
         """
-        This method should return the cost of a node
+        Connect the new node to the tree.
+        """
+        node_min = nearest_node_idx
+        cost_min = tree.cost[nearest_node_idx] + self.line_cost(tree.pos[nearest_node_idx], new_node)
+        for i in range(len(neighborhood_idx)):
+            neighbor_idx = neighborhood_idx[i]
+            collision = self.check_collision(tree.pos[neighbor_idx], new_node)
+            cost = tree.cost[neighbor_idx] + self.line_cost(tree.pos[neighbor_idx], new_node)
+            if not collision and cost < cost_min:
+                node_min = neighbor_idx
+                cost_min = cost
+            
+        tree.pos = np.vstack((tree.pos, new_node))
+        tree.parent = np.append(tree.parent, node_min)
+        tree.cost = np.append(tree.cost, cost_min)
+        new_node_idx = len(tree.pos) - 1
+        tree.children[node_min].append(new_node_idx)
+        tree.children.append([])
 
-        Args:
-            node (Node): the current node the cost is calculated for
-        Returns:
-            cost (float): the cost value of the node
+    def rewire(self, tree, new_node, neighborhood_idx):
         """
-        return 0
+        Rewire the neighborhood after connecting the new node to the tree.
+        """
+        for i in range(len(neighborhood_idx)):
+            neighbor_idx = neighborhood_idx[i]
+            collision = self.check_collision(new_node, tree.pos[neighbor_idx])
+            cost = tree.cost[-1] + self.line_cost(new_node, tree.pos[neighbor_idx])
+            if not collision and cost < tree.cost[neighbor_idx]:
+                old_parent = tree.parent[neighbor_idx]
+                new_parent_idx = len(tree.pos) - 1
+                tree.children[old_parent].remove(neighbor_idx)
+                tree.children[new_parent_idx].append(neighbor_idx)
+                tree.parent[neighbor_idx] = new_parent_idx
+                tree.cost[neighbor_idx] = cost
+
+                parents = deque()
+                parents.append(neighbor_idx)
+                while parents:
+                    parent = parents.popleft()
+                    for child in tree.children[parent]:
+                        tree.cost[child] = tree.cost[parent] + self.line_cost(tree.pos[parent], tree.pos[child])
+                        parents.append(child)
 
     def line_cost(self, n1, n2):
         """
         This method should return the cost of the straight line between n1 and n2
 
         Args:
-            n1 (Node): node at one end of the straight line
-            n2 (Node): node at the other end of the straint line
+            n1 (np.ndarray): position of the first node
+            n2 (np.ndarray): position of the second node
         Returns:
             cost (float): the cost value of the line
         """
-        return 0
+        cost = LA.norm(n1 - n2)
+        return cost
 
     def near(self, tree, node):
         """
@@ -411,11 +537,19 @@ class RRT(Node):
 
         Args:
             tree ([]): current tree as a list of Nodes
-            node (Node): current node we're finding neighbors for
+            node_pos (np.ndarray): position of the current node we're finding neighbors for
         Returns:
-            neighborhood ([]): neighborhood of nodes as a list of Nodes
+            neighborhood (np.ndarray): neighborhood of nodes as an array of node indices
         """
-        neighborhood = []
+        num_nodes = len(tree.pos)
+        if not self.fix_rewire_radius:
+            rewire_radius = min(self.gamma * (math.sqrt(math.log(num_nodes) / num_nodes)), self.step_size)
+        else:
+            rewire_radius = self.rewire_radius
+        nodes = tree.pos
+        dist = LA.norm(nodes - node, axis=1)
+        in_neighborhood = dist < rewire_radius
+        neighborhood = in_neighborhood.nonzero()[0]
         return neighborhood
 
 

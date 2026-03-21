@@ -3,18 +3,13 @@
 This file contains the class definition for tree nodes and RRT
 Before you start, please read: https://arxiv.org/pdf/1105.1186.pdf
 
-TODO: 
-- Implement a probabilistic occupancy grid.
-    - Shift the occupancy grid according to odom.
-    - Update the occupancy grid according to lidar scans.
-- Implement RRT rebuild gate.
-- Implement RRT*.
-- Implement pure pursuit with odom.
-- Replace particle filter with faster SLAM methods.
+TODO:
+- Add children to RRTree to speed up rewiring.
 """
 import numpy as np
 from numpy import linalg as LA
 import math
+from scipy.interpolate import splprep, splev
 
 import rclpy
 from rclpy.node import Node
@@ -36,6 +31,7 @@ class RRTree(object):
         self.pos = np.array([[0.0, 0.0]]) # shape (num_nodes, 2)
         self.parent = np.array([-1])
         self.cost = np.array([0.0]) # only used in RRT*
+        self.children = [[]]        # children[i] = list of child indices of node i
 
 
 # class def for RRT
@@ -92,8 +88,10 @@ class RRT(Node):
         self.lidar_offset = self.get_parameter('lidar_offset').value
 
         # bubble radius, in meters
-        self.declare_parameter('bubble_radius', 0.1016)
-        self.bubble_radius = self.get_parameter('bubble_radius').value
+        self.declare_parameter('bubble_width', 0.1016)
+        self.bubble_width = self.get_parameter('bubble_width').value
+        self.declare_parameter('bubble_height', 0.3302)
+        self.bubble_height = self.get_parameter('bubble_height').value
 
         # maximum number of iterations for RRT
         self.declare_parameter('max_iterations', 1000)
@@ -114,6 +112,9 @@ class RRT(Node):
         # look ahead distance for pure pursuit, in meters
         self.declare_parameter('l_pure_pursuit', 1.0)
         self.l_pure_pursuit = self.get_parameter('l_pure_pursuit').value
+
+        self.declare_parameter('p', 1.0)
+        self.p = self.get_parameter('p').value
 
         # velocity for pure pursuit, in m/s
         self.declare_parameter('v', 1.0)
@@ -171,8 +172,11 @@ class RRT(Node):
 
         # extend obstacles by bubble radius
         # TODO: use a circle bubble instead of a square bubble
-        bubble_cells = int(self.bubble_radius / self.grid_resolution)
-        self.occupancy_grid = binary_dilation(self.occupancy_grid, structure=np.ones((2*bubble_cells+1, 2*bubble_cells+1)))
+        bubble_width_cells = int(self.bubble_width / self.grid_resolution)
+        bubble_height_cells = int(self.bubble_height / self.grid_resolution)
+        structure = np.ones((2*bubble_height_cells+1, 2*bubble_width_cells+1))
+        structure[bubble_height_cells+1:, :] = 0
+        self.occupancy_grid = binary_dilation(self.occupancy_grid, structure=structure)
 
         if self.vis:
             occupancy_grid_msg = visualize_occupancy_grid_as_marker_array(self.occupancy_grid, self.lidar_timestamp, self.grid_resolution, self.origin_x, self.origin_y)
@@ -219,14 +223,15 @@ class RRT(Node):
 
                 if self.is_goal(new_node, goal_pos):
                     path = self.find_path(self.RRT, len(self.RRT.pos)-1)
+                    smoothed_path = self.smooth_path(path)
 
                     if self.vis:
                         tree_marker = visualize_tree(self.RRT.pos, self.RRT.parent, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='tree', id=0, color=(1.0, 0.0, 0.0, 1.0))
-                        path_marker = visualize_path(path, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='path', id=0, color=(0.0, 1.0, 1.0, 1.0))
+                        path_marker = visualize_path(smoothed_path, self.pose_timestamp, frame_id='/ego_racecar/base_link', ns='path', id=0, color=(0.0, 1.0, 1.0, 1.0))
                         self.marker_array.markers.append(tree_marker)
                         self.marker_array.markers.append(path_marker)
 
-                    self.pure_pursuit(path)
+                    self.pure_pursuit(smoothed_path)
 
                     if self.vis:
                         self.marker_array_publisher.publish(self.marker_array)
@@ -342,6 +347,25 @@ class RRT(Node):
             path.append(tree.parent[path[-1]])
         return self.RRT.pos[path[::-1]] # shape (num_nodes_in_path, 2)
     
+    def smooth_path(self, path):
+        # # shortcutting
+        # shortcut = [path[0]]
+        # i = 0
+        # while i < len(path) - 1:
+        #     for j in range(len(path) - 1, i, -1):
+        #         if not self.check_collision(path[i], path[j]):
+        #             shortcut.append(path[j])
+        #             i = j
+        #             break
+        # path = np.array(shortcut)
+        # spline
+        if len(path) < 4:
+            return path
+        tck, _ = splprep([path[:, 0], path[:, 1]], s=0, k=3)
+        t = np.linspace(0, 1, len(path)*10)
+        xs, ys = splev(t, tck)
+        return np.column_stack([xs, ys])
+
     def pure_pursuit(self, path):
         """
         Args:
@@ -354,7 +378,7 @@ class RRT(Node):
 
         target_y = target[1]
         gamma = 2 * target_y / l ** 2
-        angle = np.clip(gamma, -0.7854, 0.7854)
+        angle = np.clip(self.p * gamma, -0.7854, 0.7854)
 
         # publish drive message
         drive_msg = AckermannDriveStamped()
@@ -403,6 +427,9 @@ class RRT(Node):
         tree.pos = np.vstack((tree.pos, new_node))
         tree.parent = np.append(tree.parent, node_min)
         tree.cost = np.append(tree.cost, cost_min)
+        new_node_idx = len(tree.pos) - 1
+        tree.children[node_min].append(new_node_idx)
+        tree.children.append([])
 
     def rewire(self, tree, new_node, neighborhood_idx):
         """
@@ -413,15 +440,18 @@ class RRT(Node):
             collision = self.check_collision(new_node, tree.pos[neighbor_idx])
             cost = tree.cost[-1] + self.line_cost(new_node, tree.pos[neighbor_idx])
             if not collision and cost < tree.cost[neighbor_idx]:
-                tree.parent[neighbor_idx] = len(tree.pos) - 1
+                old_parent = tree.parent[neighbor_idx]
+                new_parent_idx = len(tree.pos) - 1
+                tree.children[old_parent].remove(neighbor_idx)
+                tree.children[new_parent_idx].append(neighbor_idx)
+                tree.parent[neighbor_idx] = new_parent_idx
                 tree.cost[neighbor_idx] = cost
 
                 parents = deque()
                 parents.append(neighbor_idx)
                 while parents:
                     parent = parents.popleft()
-                    children = (tree.parent == parent).nonzero()[0]
-                    for child in children:
+                    for child in tree.children[parent]:
                         tree.cost[child] = tree.cost[parent] + self.line_cost(tree.pos[parent], tree.pos[child])
                         parents.append(child)
 

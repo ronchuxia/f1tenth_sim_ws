@@ -54,6 +54,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/rrt_node.py
   scripts/rrt_star_node.py
+  scripts/rrt_star_gate_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
